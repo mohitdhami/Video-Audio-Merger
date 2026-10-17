@@ -1,179 +1,82 @@
-# videojoin — drop videos + audio, get them joined and merged
+# videojoin — browser-only (WebAssembly) version
 
-A tiny self-contained Go server with a web UI. Drag one or more videos and one
-or more audio files into the browser, the server joins them with **ffmpeg** and
-gives you a download link for the result. Nothing is uploaded to a third party
-and no database is involved — files live in a temp directory per job and are
-deleted after the TTL (2 h by default) or on shutdown.
+The same app as the Go server (which lives on the `main` branch), with no
+server at all: ffmpeg runs **inside the browser tab** through
+[ffmpeg.wasm](https://ffmpegwasm.netlify.app/). Files never leave the machine —
+they are not even read by anything outside the page.
 
 ```
-┌────────────┐   multipart POST   ┌──────────────────────────────────┐
-│  browser   │ ─────────────────▶ │ Go server                        │
-│  (web UI)  │                    │  ffprobe → join clips/tracks →   │
-│            │ ◀───── poll ────── │  merge video+audio → temp dir    │
-│            │ ◀── GET .../file ─ │  streamed download               │
-└────────────┘                    └──────────────────────────────────┘
+┌───────────────────────────── browser tab ─────────────────────────────┐
+│  drop files → sniff/probe content → join videos → join audio → merge  │
+│                        (ffmpeg.wasm, in memory)                       │
+│  result → Blob → ⬇ download                                          │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
-With several files the pipeline runs in up to three stages, and the progress
-bar spans all of them:
+## Run it
 
-1. **Join the videos** (in list order) — stream copy when the clips share the
-   same codec parameters, otherwise re-encoded with the concat filter.
-2. **Join the audio files** (in list order) — same idea for tracks.
-3. **Merge** the joined video with the joined audio using your options.
-
-## Requirements
-
-- Go 1.22+ (uses `net/http` method patterns such as `POST /api/jobs`)
-- `ffmpeg` and `ffprobe` on your `PATH` (or point at them with `-ffmpeg` / `-ffprobe`)
-
-## Run
+The page needs to be served over `http://` (workers and `.wasm` files cannot be
+loaded from `file://`). Everything else is static, so any way of serving the
+folder works:
 
 ```sh
-go run .            # http://localhost:8080
+./serve.sh              # python3 -m http.server 8080 (starts here)
 # or
-go build -o videojoin . && ./videojoin -open
+python3 -m http.server 8080
+# or
+npx serve .
 ```
 
-Open <http://localhost:8080>. The header shows whether ffmpeg was found.
+Then open <http://localhost:8080/>. The header shows *ffmpeg ready · on-device*
+once the core (about 32 MB, vendored in `core/`) has been loaded. After that the
+app works fully offline.
 
-### Browser-only version (WebAssembly)
+## Deploy
 
-There is also a server-less build in [`wasm/`](wasm/README.md): the same UI and
-the same pipeline, but ffmpeg runs inside the browser tab through
-[ffmpeg.wasm](https://ffmpegwasm.netlify.app/) — nothing is uploaded anywhere,
-and no Go binary is needed. Serve the folder and open it:
+The branch root is the whole app, so any static host works as-is — no build
+step. For GitHub Pages: *Settings → Pages → Deploy from a branch → `wasm` →
+`/ (root)`*, which serves the app at `https://<user>.github.io/<repo>/`.
 
-```sh
-cd wasm && ./serve.sh      # then open http://localhost:8080/
-```
+## What is the same as the server version
 
-It trades the server's disk space and native speed for pure in-tab processing
-(keep the total input under ~1 GB, and expect single-threaded WASM speed for
-re-encoding). See `wasm/README.md` for details.
+- Multiple videos and audio files per side, joined in list order; drag rows to
+  reorder or move them between the lists.
+- Content-based classification: dropped files are placed by looking at their
+  bytes (container/stream headers), a mixed drop is split into both lists, and
+  `ffmpeg -i` verifies every file before the merge:
+  - `stream` without an extension works, a video named `stream.mp3` is a video,
+    an audio-only `.mp4` ends up on the audio side, cover art is not video.
+  - Unreadable files fail with a clear message; the lists stay usable.
+- The same three-stage pipeline with weighted progress and the same fallbacks:
+  concat demuxer stream-copy when parameters match, concat filter re-encode
+  when they do not, silent clips filled with matching silence in *mix* mode.
+  Added track at 50% volume in mix mode (`normalize=0`).
+- Options: replace/mix, copy/×264, AAC bitrate, MP4/MKV, trim to shortest.
 
-### Flags
+## Differences from the server version
 
-| flag | default | meaning |
+| topic | server version | this version |
 | --- | --- | --- |
-| `-addr` | `:8080` | listen address |
-| `-tmp` | system temp dir | where per-job temp directories are created |
-| `-ttl` | `2h` | how long finished results are kept before cleanup |
-| `-max-upload` | `8GB` | max combined upload size per job (accepts `500MB`, `8GiB`, …) |
-| `-job-timeout` | `2h` | max runtime of a single ffmpeg merge |
-| `-ffmpeg` | `ffmpeg` | path to the ffmpeg binary |
-| `-ffprobe` | `ffprobe` | path to the ffprobe binary |
-| `-open` | `false` | open the web UI in the default browser on start |
+| probing | `ffprobe -print_format json` | parsed `ffmpeg -i` output (no ffprobe in the core) |
+| storage | temp files on disk, TTL cleanup | RAM only (ffmpeg's in-memory filesystem) |
+| size limits | gigabytes (disk) | bounded by WASM memory — keep the total under ~1 GB |
+| speed | native ffmpeg | single-thread WebAssembly core, slower for re-encodes (copy paths stay fast) |
+| cancel | cancels the job on the server | terminates the engine and loads a fresh one |
+| sharing | everyone who can reach the port | files never leave the tab |
 
-Example:
-
-```sh
-./videojoin -addr :9000 -tmp /var/tmp/videojoin -ttl 30m -max-upload 500MB -open
-```
-
-## What the UI lets you choose
-
-- **Multiple files per side** — drop as many videos and/or audio files as you
-  like into either zone (or both at once: mixed drops are split up right away —
-  every file lands in the list matching its content, so both sections show their
-  own files immediately). Items are joined in list order, so drag the rows to
-  reorder them; you can also drag a row **across** to the other list to change
-  what it is used for. Each row can be removed, and `+ add` / `clear` manage
-  the list.
-- **Any extension, no extension, wrong extension** — files are classified by
-  what is actually inside them (ffprobe), never by their name:
-  - The browser already peeks into each file on drop (container + stream
-    headers), so mixed drops split into the video and audio lists instantly.
-  - Right after the upload the server probes every file with ffprobe and reports
-    the definitive classification back (`files`); if it disagrees with the
-    initial guess, the rows move to their proper list before the merge runs.
-  - `stream` (no extension) works, as does a video called `stream.mp3`.
-  - An audio-only file dropped on the video side ends up on the audio side
-    automatically (and vice versa) — the job log says so.
-  - A file that contains *both* video and audio stays on the side you dropped
-    it on: video side = use its picture, audio side = use its soundtrack.
-    Drag the row to the other list to switch.
-  - Embedded cover art (e.g. album art in an MP3) does **not** count as video.
-  - The temporary filename on disk is only cosmetic: unknown extensions become
-    `.bin` and ffmpeg still recognises the real format.
-  - Unreadable files and uploads without a video (or without audio) are rejected
-    immediately with a clear message, before anything starts encoding.
-- **Audio handling** — *replace* the video's audio, or *mix* the dropped audio
-  with the existing track; the added track is mixed in at 50% volume under the
-  original (fixed default, API callers can still tune it with `mixVolume`).
-- **Video stream** — stream copy (instant, lossless) or re-encode to H.264
-  (rescues containers/codecs that MP4 can't hold).
-- **Audio encoder / bitrate** — AAC at 128–320 kbps, or copy the original codec.
-- **Container** — MP4 (with `+faststart`, plays while downloading) or MKV.
-- **Trim to shortest input** — cut the result to the shorter of the two sides.
-
-Progress is streamed live from `ffmpeg -progress`, including the current stage,
-speed and an ETA. If something fails, the UI shows the important line of
-ffmpeg's stderr plus a collapsible full log.
-
-### How multiple files are joined
-
-| situation | what happens |
-| --- | --- |
-| clips share codec, size, pixel format and frame rate | concat demuxer with `-c copy` — instant and lossless |
-| clips differ in any of those | concat filter: scaled/padded to the first clip's frame size, `setsar=1`, frame rate normalised, re-encoded with H.264 (the final merge then copies) |
-| *replace* mode | the clips' own audio is dropped while joining, so mixed audio layouts are fine |
-| *mix* mode | the clips' audio is kept and joined; silent clips get matching silence inserted, so tracks line up |
-| *mix* mode but no clip has audio | falls back to `replace` and says so in the log |
-| audio files with matching codec/rate/channels | concat demuxer with `-c copy` |
-| audio files that differ | re-encoded to AAC 48 kHz stereo while joining |
-
-## HTTP API
-
-| method & path | purpose |
-| --- | --- |
-| `POST /api/jobs` | multipart upload. File fields `video` and `audio` may be repeated (up to 20 each, **order is preserved**) and are only hints: the server inspects every file and uses it on the side matching its real content. Optional fields: `mode` (`replace`\|`mix`), `videoCodec` (`copy`\|`x264`), `audioCodec` (`aac`\|`copy`), `audioBitrate`, `container` (`mp4`\|`mkv`), `shortest` (`true`\|`false`), `mixVolume` (`0`–`2`). Returns `202` with the job JSON, or `400` with `{"error": …, "files": […]}` when a file is unreadable or the uploads contain no video (or no audio) — nothing is encoded in that case. |
-| `GET /api/jobs/{id}` | job status: `status`, `progress` (0–100), `stage` (`joining 3 video clips`, `merging video + audio`, …), `speed`, `elapsedMs`, `files` (per-file `name` + `kind` as decided by content), aggregated probe info for both sides (`count`, summed `duration`/`size`), `error`, `log`. |
-| `GET /api/jobs/{id}/file` | download the merged file (supports range requests). `409` until the job is done. |
-| `DELETE /api/jobs/{id}` | cancel the job and remove its temp files immediately. |
-| `GET /api/health` | `{"ok":true,"ffmpeg":"ffmpeg version …"}` |
-
-Example with curl — join three clips and two tracks, then download:
-
-```sh
-id=$(curl -s \
-       -F "video=@part1.mp4" -F "video=@part2.mp4" -F "video=@part3.mp4" \
-       -F "audio=@song1.mp3" -F "audio=@song2.mp3" \
-       -F mode=mix -F mixVolume=0.4 \
-       http://localhost:8080/api/jobs | jq -r .id)
-curl -s http://localhost:8080/api/jobs/$id | jq '{status, stage, progress, speed}'
-curl -OJ http://localhost:8080/api/jobs/$id/file
-```
-
-## Layout
+## Files
 
 ```
-main.go            server: jobs, multi-file uploads, probe, join/merge stages, progress
-web/index.html     UI markup (embedded into the binary via go:embed)
-web/app.js         drag & drop lists (multi-file, reorderable), upload progress, polling, download
-web/style.css      dark theme
-wasm/              browser-only build: the same app with ffmpeg.wasm (see wasm/README.md)
+index.html   the UI (same layout as the server version)
+app.js       lists, sniffing, ffmpeg.wasm pipeline, progress, download
+style.css    dark theme
+serve.sh     convenience static server (python3)
+vendor/      @ffmpeg/ffmpeg 0.12.15 UMD build (ffmpeg.js + worker chunk)
+core/        @ffmpeg/core 0.12.10 single-thread build (ffmpeg-core.js/.wasm)
 ```
 
-Everything is in one binary; `web/` is embedded at build time.
-
-## Notes
-
-- Uploads are streamed straight to disk (`r.MultipartReader`), so large files
-  never sit in memory. A single job may be up to `-max-upload` in total
-  (default 8 GB) and 20 files per side.
-- Each uploaded file is probed with ffprobe once, before the job is registered:
-  the result (`files`) is sent to the UI and reused by the pipeline, so the
-  lists and the merge always agree on which file is video and which is audio.
-- Multi-file jobs use temporary intermediates (`joined-video.mkv`,
-  `joined-audio.mkv`) that are removed as soon as the final merge succeeds;
-  they are never downloaded and are cleaned up with the job directory.
-- A single-file job runs exactly one ffmpeg command:
-  `ffmpeg -y -i <video> -i <audio> -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac
-  -shortest -movflags +faststart out.mp4` (adjusted for your chosen options);
-  in mix mode it uses
-  `amix=inputs=2:duration=shortest|longest:normalize=0` with a `volume` filter
-  on the added track.
-- ffmpeg's own error output is kept (last 60 lines) and shown in the UI, so
-  odd formats are debuggable without reading server logs.
+The vendored core is the single-thread build, so it works on any static host
+without COOP/COEP headers. If you serve the folder with
+`Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: require-corp` (so `crossOriginIsolated` is true)
+you can drop in `@ffmpeg/core-mt` instead for a big speed-up on re-encodes.
