@@ -40,18 +40,15 @@ Open <http://localhost:8080>. The header shows whether ffmpeg was found.
 
 ### Browser-only version (WebAssembly)
 
-There is also a server-less build in [`wasm/`](wasm/README.md): the same UI and
-the same pipeline, but ffmpeg runs inside the browser tab through
-[ffmpeg.wasm](https://ffmpegwasm.netlify.app/) — nothing is uploaded anywhere,
-and no Go binary is needed. Serve the folder and open it:
-
-```sh
-cd wasm && ./serve.sh      # then open http://localhost:8080/
-```
-
-It trades the server's disk space and native speed for pure in-tab processing
-(keep the total input under ~1 GB, and expect single-threaded WASM speed for
-re-encoding). See `wasm/README.md` for details.
+The same app also exists as a server-less build on the
+[`wasm` branch](https://github.com/mohitdhami/Video-Audio-Merger/tree/wasm):
+ffmpeg runs inside the browser tab through
+[ffmpeg.wasm](https://ffmpegwasm.netlify.app/) — nothing is uploaded anywhere
+and no Go binary is needed. It trades the server's disk space and native speed
+for pure in-tab processing (keep the total input under ~1 GB, and expect
+single-threaded WASM speed for re-encoding). That branch is self-contained:
+clone/browse it, run `./serve.sh` and open the page (deployable to any static
+host as-is).
 
 ### Flags
 
@@ -153,7 +150,6 @@ main.go            server: jobs, multi-file uploads, probe, join/merge stages, p
 web/index.html     UI markup (embedded into the binary via go:embed)
 web/app.js         drag & drop lists (multi-file, reorderable), upload progress, polling, download
 web/style.css      dark theme
-wasm/              browser-only build: the same app with ffmpeg.wasm (see wasm/README.md)
 ```
 
 Everything is in one binary; `web/` is embedded at build time.
