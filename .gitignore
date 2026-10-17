@@ -1,0 +1,10 @@
+# compiled Go binary
+/videojoin
+/videojoin.exe
+
+# user media / local test downloads
+/downloads/
+
+# macOS
+.DS_Store
+**/.DS_Store
